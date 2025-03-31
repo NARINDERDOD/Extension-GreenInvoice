@@ -1,0 +1,381 @@
+// Base URLs
+//baseGreenInvoiceUrl = "https://sandbox.d.greeninvoice.co.il/api/v1/";
+baseGreenInvoiceUrl = "https://api.greeninvoice.co.il/api/v1/";
+greenInvoiceTokenUrl = baseGreenInvoiceUrl + "account/token";
+greenInvoiceDocumentUrl = baseGreenInvoiceUrl + "documents";
+// Current Date
+currentDt = zoho.currentdate.toString('YYYY-MM-DD');
+// Predefined IDs for testing
+idList = list();
+//Get the "id" field from the invoice object
+//Check if "id" field exists and is not empty
+if(invoice.contains("Invoices.ID") && invoice.get("Invoices.ID") != null)
+{
+	idlist = invoice.get("Invoices.ID").toList("|||");
+	id_ = invoice.get("Invoices.ID");
+}
+else
+{
+	return " inv" + invoice;
+}
+// Iterate over the IDs and add them to idList
+for each  id in idlist
+{
+	// Print each ID for debugging
+	info id;
+	idList.add(id);
+}
+// idList.add(5560261000022671056);
+// idList.add(5560261000022647072);
+// idList.add(5560261000022657264);
+info "Selected IDs: " + idList;
+if(idList.isEmpty())
+{
+	return "No records selected.";
+}
+// Step 1: Get the Green Invoice Token
+API_Key_greeninvoice = zoho.crm.getOrgVariable("createinvoice1__API_Key_for_Green_Invoice");
+secret_greeninvoice = zoho.crm.getOrgVariable("createinvoice1__Secret");
+if(API_Key_greeninvoice == null || secret_greeninvoice == null)
+{
+	return "Error: API Key or Secret Key is missing in CRM Variables.";
+}
+tokenExpiryTimeStr = zoho.crm.getOrgVariable("createinvoice1__Expiry_Time").toDateTime();
+currentDateTime = zoho.currenttime;
+expiryBuffer = currentDateTime.addMinutes(2);
+tokenExpiryTime = tokenExpiryTimeStr.toDateTime("yyyy-MM-dd'T'HH:mm:ss'Z'");
+authToken = null;
+// Generate a new token if the current one is expired
+if(expiryBuffer > tokenExpiryTime)
+{
+	headerMap1 = Map();
+	bodyMap = Map();
+	headerMap1.put("Content-Type","application/json");
+	bodyMap.put("id",API_Key_greeninvoice);
+	bodyMap.put("secret",secret_greeninvoice);
+	response = invokeurl
+	[
+		url :greenInvoiceTokenUrl
+		type :POST
+		parameters:bodyMap.toString()
+		headers:headerMap1
+	];
+	if(response == null || !response.containsKey("token"))
+	{
+		return "Error: Failed to generate new token from Green Invoice.";
+	}
+	getExpTimeStr = response.get("expires");
+	getExpTime = getExpTimeStr.toLong() * 1000;
+	expiryDateTime = getExpTime.toDate();
+	authToken = response.get("token");
+	info authToken;
+	if(authToken == null)
+	{
+		return "Error: Failed to retrieve authentication token.";
+	}
+	// Update token in Zoho CRM
+	variable1 = Map();
+	variable1.put("apiname","createinvoice1__Expiry_Time");
+	variable1.put("value",expiryDateTime.toString("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+	variable2 = Map();
+	variable2.put("apiname","createinvoice1__Expiry_Time1");
+	variable2.put("value",authToken);
+	zoho.crm.invokeConnector("crm.set",variable1);
+	zoho.crm.invokeConnector("crm.set",variable2);
+}
+else
+{
+	authToken = zoho.crm.getOrgVariable("createinvoice1__Expiry_Time1");
+	if(authToken == null || authToken.isEmpty())
+	{
+		return "Error: Existing token is missing.";
+	}
+}
+// Step 2: Fetch invoices and generate receipt
+combinedItemList = List();
+invoiceitemsForCRm = List();
+clientID = List();
+Grand_Total = 0.0;
+currency_symbol = "ILS";
+for each  id in idList
+{
+	info "Processing ID: " + id;
+	dynamic_map = Map();
+	dynamic_map.put("record_id",id);
+	// Invoke the connector to get the invoice details
+	invoice_response = zoho.crm.invokeConnector("createinvoice1.zohocrmconnect.getinvoicefromcrm",dynamic_map);
+	info invoice_response;
+	if(invoice_response == null || !invoice_response.containsKey("response"))
+	{
+		info "Error: No response found for record ID: " + id;
+		continue;
+	}
+	response_string = invoice_response.get("response");
+	product_res = response_string.toMap();
+	if(!product_res.containsKey("data") || product_res.get("data") == null)
+	{
+		info "Error: No invoice data found for record ID: " + id;
+		continue;
+	}
+	data_list = product_res.get("data");
+	if(data_list.isEmpty())
+	{
+		info "Error: No invoice details available for record ID: " + id;
+		continue;
+	}
+	first_record = data_list.get(0);
+	account_name = first_record.get("Contact_Name");
+	Invoice_Date = first_record.get("Invoice_Date");
+	Due_Date = first_record.get("Due_Date");
+	if(account_name != null && account_name.getJSON("id"))
+	{
+		account_id = account_name.getJSON("id");
+	}
+	else
+	{
+		info "Error: Contact ID is missing for record ID: " + id;
+		continue;
+	}
+	acc_map = Map();
+	acc_map.put("record_id",account_id);
+	Contacts = zoho.crm.invokeConnector("createinvoice1.zohocrmconnect.getcontactsfromcrm1",acc_map);
+	if(Contacts == null || !Contacts.containsKey("response"))
+	{
+		info "Error: Failed to fetch contact details for Contact ID: " + account_id;
+		continue;
+	}
+	data_con = Contacts.get("response").get("data");
+	if(data_con == null || data_con.isEmpty())
+	{
+		info "Error: Contact data is empty for Contact ID: " + account_id;
+		continue;
+	}
+	clientID_FromCRM = data_con.get(0).get("createinvoice1__clientMorningID");
+	if(clientID_FromCRM == null)
+	{
+		info "Error: Client ID is null in Contact Module for Contact ID: " + account_id;
+		continue;
+	}
+	clientID.add(clientID_FromCRM);
+	// Gather items
+	invoiced_items = first_record.get("Invoiced_Items");
+	if(invoiced_items == null)
+	{
+		info "Error: No invoiced items found for record ID: " + id;
+		continue;
+	}
+	for each  prod in invoiced_items
+	{
+		info "prod " + prod;
+		prodctID = prod.get("Product_Name").get("id");
+		info "prodctID " + prodctID;
+		product_map = Map();
+		product_map.put("record_id",prodctID);
+		Products = zoho.crm.invokeConnector("createinvoice1.zohocrmconnect.getproductsfromcrm",product_map);
+		info "Products " + Products;
+		Products_res = Products.get("response");
+		data_list = Products_res.get("data");
+		first_record = data_list.get(0);
+		productMorningID = first_record.get("createinvoice1__productMorningID");
+		Product_Name = first_record.get("Product_Name");
+		Description = first_record.get("Description");
+		Product_Code = first_record.get("Product_Code");
+		Product_id = first_record.get("id");
+		Unit_Price = first_record.get("Unit_Price");
+		currency_ = first_record.get("$currency_symbol");
+		//	currency_symbol = "ILS";
+		currency_symbol = createinvoice1.CreateCurrencyString(currency_);
+		info "currency_symbol " + currency_symbol;
+		info "Unit_Price" + Unit_Price;
+		info "Product_Name " + Product_Name;
+		info "Description " + Description;
+		info "Product_Code " + Product_Code;
+		info "createinvoice1__productMorningID " + productMorningID;
+		itemMap = Map();
+		itemMapForCRM = Map();
+		itemName = ifnull(prod.get("Product_Name").get("name"),".");
+		productDescription = ifnull(Description,itemName);
+		itemMap.put("catalogNum",itemName);
+		itemMap.put("description",productDescription);
+		itemMap.put("quantity",prod.get("Quantity"));
+		itemMap.put("price",ifnull(prod.get("Net_Total"),0.01));
+		itemMap.put("currency",currency_symbol);
+		itemMap.put("vatRate",0);
+		itemMap.put("vatType",2);
+		itemMapForCRM.put("Product_Name",prod.get("Product_Name").get("id"));
+		itemMapForCRM.put("Quantity",prod.get("Quantity"));
+		itemMapForCRM.put("List_Price",prod.get("List_Price"));
+		itemMapForCRM.put("Net_Total",prod.get("Net_Total"));
+		itemMapForCRM.put("Discount",prod.get("Discount"));
+		combinedItemList.add(itemMap);
+		invoiceitemsForCRm.add(itemMapForCRM);
+		Grand_Total = Grand_Total + ifnull(prod.get("Net_Total"),0.01);
+	}
+	// Check if the client ID list is empty
+	if(clientID.isEmpty())
+	{
+		return "Error: No client ID found. Cannot proceed.";
+	}
+}
+info "invoiceitemsForCRm " + invoiceitemsForCRm;
+// Verify if all client IDs are the same
+info "clientID " + clientID;
+firstID = clientID.get(0);
+for each  id in clientID
+{
+	if(id != firstID)
+	{
+		info "idididid " + id;
+		return "Error: Client IDs do not match. Cannot proceed.";
+	}
+}
+client_id_greeninvoice = firstID;
+response_string = invoice_response.get("response");
+data_list = response_string.get("data").get(0);
+Invoice_Date = data_list.get("Invoice_Date");
+Due_Date = data_list.get("Due_Date");
+Payment_Method = data_list.get("createinvoice1__Payment_Method");
+selected_currency = data_list.get("createinvoice1__Currancy");
+exchange_rate = data_list.get("createinvoice1__Exchange_Rates");
+info "Invoice_Date " + Invoice_Date;
+invoice_name = account_name.get("name");
+info "inv_name " + invoice_name;
+currentDt = zoho.currentdate.toString('yyyy-MM-dd');
+data = Map();
+getBankDetail = Map();
+data.put("description",ifnull(invoice_name,""));
+if(Invoice_Date != null && Invoice_Date != "")
+{
+	data.put("date",ifnull(currentDt,currentDt));
+}
+else
+{
+	data.put("date",currentDt);
+}
+if(Due_Date != null && Due_Date != "")
+{
+	data.put("dueDate",Due_Date.toString("yyyy-MM-dd"));
+}
+data.put("type",400);
+data.put("lang","he");
+data.put("currency",ifnull("ILS","ILS"));
+data.put("vatType",0);
+data.put("discount",{"type":"sum"});
+data.put("rounding",false);
+data.put("signed",true);
+data.put("attachment",true);
+data.put("maxPayments",1);
+info "clientID = " + client_id_greeninvoice;
+//data.put("client",{"id":clientID_FromCRM});
+data.put("client",{"id":clientID_FromCRM});
+info "itemList" + combinedItemList;
+data.put("income",combinedItemList);
+info "combinedItemList " + combinedItemList;
+if(Invoice_Date != null && Invoice_Date != "")
+{
+	getBankDetail.put("date",ifnull(currentDt,currentDt));
+}
+else
+{
+	getBankDetail.put("date",currentDt);
+}
+if(Payment_Method == 0 || Payment_Method == -1 || Payment_Method == 11)
+{
+	getBankDetail.put("type",1);
+}
+else
+{
+	info "	Pay_Method = " + Payment_Method;
+	getBankDetail.put("type",ifnull(Payment_Method,1));
+}
+getBankDetail.put("price",ifnull(Grand_Total,0.0));
+getBankDetail.put("currency",ifnull(selected_currency,"ILS"));
+getBankDetail.put("description",ifnull(selected_currency,"ILS"));
+//getBankDetail.put("currencyRate",ifnull(exchange_rate,""));
+data.put("payment",getBankDetail.tolist());
+info "data " + data;
+headerMap = Map();
+headerMap.put("Authorization","Bearer " + authToken);
+headerMap.put("Content-Type","application/json");
+response = invokeurl
+[
+	url :greenInvoiceDocumentUrl
+	type :POST
+	parameters:data.toString()
+	headers:headerMap
+];
+info "Create Document Response: " + response;
+document_id = response.get("id");
+morning_no = response.get("number");
+if(response.containKey("url"))
+{
+	link_docx = response.get("url").get("origin").toString();
+}
+linkedDocumentId = response.get("id");
+dynamic_map = Map();
+if(linkedDocumentId != null)
+{
+	Invoiced_Items = List();
+	Invoiced_Items.add(invoiceitemsForCRm);
+	info "Invoiced_Items " + Invoiced_Items;
+	dynamic_map = Map();
+	//Map all dynamic params to your desired values 
+	dynamic_map.put("Subject",morning_no);
+	dynamic_map.put("Invoice_Date",today);
+	dynamic_map.put("Contact_Name",account_id);
+	dynamic_map.put("Document_Type","קבלה");
+	dynamic_map.put("Download_Links",link_docx);
+	dynamic_map.put("invoiceMorningID",document_id);
+	dynamic_map.put("morningInvoiceNumber",morning_no);
+	dynamic_map.put("Created_By_Button","true");
+	dynamic_map.put("Invoiced_Items",invoiceitemsForCRm);
+	info "dynamic_map " + dynamic_map;
+	createdRecordResp = zoho.crm.invokeConnector("createinvoice1.zohocrmconnect.createrecord1",dynamic_map);
+	info "createdRecordResp " + createdRecordResp;
+	finalresponse = createdRecordResp;
+	if(createdRecordResp.containKey("status_code"))
+	{
+		status_code = createdRecordResp.get("status_code");
+		info "status_code " + status_code;
+		if(status_code == 201)
+		{
+			// Step 1: Get the string from "response"
+			responseString = createdRecordResp.get("response");
+			responseJSON = responseString.toMap();
+			// returns a LIST of maps
+			firstRecord = responseJSON.get("data").get(0);
+			recordId = firstRecord.get("details").get("id");
+			info recordId;
+			// add attachment
+			fileObject = invokeurl
+			[
+				url :response.get("url").get("origin").toString()
+				type :GET
+			];
+			info fileObject;
+			fileObject.getFileName();
+			name = "Invoice_" + fileObject;
+			fileObject.setFileName(name);
+			info fileObject;
+			attachFile = zoho.crm.attachFile("Invoices",recordId,fileObject);
+			info "attachFile " + attachFile;
+			finalresponse = "הצלחה ☺️";
+		}
+		else
+		{
+			info "status_code " + status_code;
+		}
+	}
+	else
+	{
+		info "error";
+	}
+}
+else
+{
+	finalresponse = response;
+}
+return finalresponse;
+// client_id_greeninvoice = firstID;
+// // Proceed with receipt creation if everything is valid
+//return "Receipt created successfully for selected records.";
